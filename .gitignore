@@ -1,0 +1,16 @@
+﻿# AssistantGrader
+bin/
+obj/
+submissions/
+logs/
+results.csv
+report.html
+repos.txt
+repos.off.txt
+graded-versions.csv
+all-students.txt
+odd-logs.txt
+*.zip
+.vs/
+.vscode/
+*repos*.txt
