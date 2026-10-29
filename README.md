@@ -188,7 +188,7 @@ new(1, "sum", "sum 522+3", ["sum", "522", "3", "exit"], Has("525")),
 //  phase (1, 2 or 3)
 ```
 
-Add `Edge: true` at the end for an edge case. Always end the inputs with `exit` (twice inside a mode).
+Add `Edge: true` at the end for an edge case. Add `AltInputs: [...]` for another input order the assignment allows; the test passes if either order does. Always end the inputs with `exit` (twice inside a mode).
 
 Available checks:
 
@@ -208,7 +208,9 @@ Available checks:
 
 **Numbers** are compared at the precision the student printed (`8.6023` accepts `8.6`, `8,60`, `8.602325…`, but not `9`); whole numbers must be exact; `13` never counts as `3`. **Words** ignore case and diacritics and must start a word (`nachadz` matches `nachádza` but not `nenachádza`). Short answer words (`nie`, `not`, `áno`, `true`…) must be the whole word, so `nie` doesn't match `niečo`. Words also work when Windows garbles Slovak letters in the output.
 
-**Labels are not answers:** "Pozícia: -1" is a not-found answer, so `find found` fails on it. This catches a program that reads the sentence and the word in the wrong order.
+**Labels are not answers:** "Pozícia: -1" is a not-found answer, so `find found` fails on it.
+
+**Input order:** the assignment doesn't say whether `find` asks for the sentence or the substring first, so both Phase 1 `find` tests try both orders and pass if either works. The report shows the order that was used.
 
 **Menus and prompts don't count as answers.** Before the tests, each program is run without being asked anything, to capture what it prints anyway:
 

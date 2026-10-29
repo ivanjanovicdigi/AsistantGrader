@@ -74,13 +74,12 @@ var scenarios = new List<Scenario>
     new(1, "odm",  "odm 16",              ["odm", "16", "exit"],           Has("4")),
     new(1, "odm",  "odm 2",               ["odm", "2", "exit"],            Has("1.4142")),
 
-    // sentence first, then the substring; position may be 0-based (8) or 1-based (9).
-    // A -1 fails "find found": that is what a program reading the inputs in the wrong order prints.
-    new(1, "find", "find found",          ["find", "Dnes je pekny den", "pekny", "exit"], Found("8", "9")),
-    new(1, "find", "find not found",      ["find", "Dnes je pekny den", "auto", "exit"],  NotFound()),
-
-    // the assistant keeps running until "exit": a program that quits after one command fails this
-    new(1, "menu", "two commands in a row", ["sum", "20", "3", "odm", "81", "exit"],   HasAll("23", "9")),
+    // The assignment doesn't say whether the sentence or the substring comes first, so both orders
+    // are tried (AltInputs): the test passes if either does. Position may be 0-based (8) or 1-based (9).
+    new(1, "find", "find found",          ["find", "Dnes je pekny den", "pekny", "exit"], Found("8", "9"),
+        AltInputs: ["find", "pekny", "Dnes je pekny den", "exit"]),
+    new(1, "find", "find not found",      ["find", "Dnes je pekny den", "auto", "exit"],  NotFound(),
+        AltInputs: ["find", "auto", "Dnes je pekny den", "exit"]),
 
     // edge cases: the extra valid value lets a program that re-asks for input finish cleanly
     new(1, "edge", "odm -4",              ["odm", "-4", "4", "exit"],       NoCrash("NaN"), Edge: true),
@@ -317,19 +316,18 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
 
         var scenarioResults = new List<ScenarioResult>();
         var ignoredAnswers  = new List<string>(); // tests that would pass if menus/prompts weren't removed
-        foreach (var s in scenarios)
+        // Runs one test with the given inputs and checks the output.
+        (RunResult R, bool Ok, bool AnswerIgnored) RunTest(Scenario s, string[] inputs, string logName)
         {
-            if (dll is null) { scenarioResults.Add(new(s, "NOT RUN", "", "")); continue; }
-
-            var r = Run("dotnet", $"\"{dll}\"", s.Inputs, scenarioTimeout);
-            SaveLog(logsDir, student, ColumnName(s), r.Output); // what the program printed, for manual review
+            var r = Run("dotnet", $"\"{dll}\"", inputs, scenarioTimeout);
+            SaveLog(logsDir, student, logName, r.Output); // what the program printed, for manual review
 
             var baseline = Baseline(baselines[""], "main");
-            if (baselines.TryGetValue(s.Inputs[0], out var modeInputs))
-                baseline += "\n" + Baseline(modeInputs, s.Inputs[0]);
-            if (s.Inputs[0] == "array")
+            if (baselines.TryGetValue(inputs[0], out var modeInputs))
+                baseline += "\n" + Baseline(modeInputs, inputs[0]);
+            if (inputs[0] == "array")
             {
-                string[] arrayInputs = [.. s.Inputs.TakeWhile(i => !arrayQuestions.Contains(i)), "exit", "exit"];
+                string[] arrayInputs = [.. inputs.TakeWhile(i => !arrayQuestions.Contains(i)), "exit", "exit"];
                 baseline += "\n" + Baseline(arrayInputs, "array " + string.Join(" ", arrayInputs[1..^2]));
             }
             r = r with
@@ -337,15 +335,31 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                 AnswerOutput         = WithoutBaseline(r.Output, baseline),
                 UnknownCommandOutput = Baseline(unknownCommandInputs, "unknown command"),
             };
-
             bool ok = s.Check.Test(r);
-            if (!ok && s.Check.Test(r with { AnswerOutput = r.Output })) ignoredAnswers.Add(ColumnName(s));
-            var result = ok                   ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
+            return (r, ok, !ok && s.Check.Test(r with { AnswerOutput = r.Output }));
+        }
+
+        foreach (var s in scenarios)
+        {
+            if (dll is null) { scenarioResults.Add(new(s, "NOT RUN", "", "", s.Inputs)); continue; }
+
+            var (r, ok, answerIgnored) = RunTest(s, s.Inputs, ColumnName(s));
+            var typed = s.Inputs;
+            // the other order of inputs, when the assignment allows both (e.g. find: sentence or word first)
+            if (!ok && s.AltInputs is not null)
+            {
+                var alt = RunTest(s, s.AltInputs, ColumnName(s) + " (other order)");
+                if (alt.Ok) (r, ok, answerIgnored, typed) = (alt.R, true, false, s.AltInputs);
+                else answerIgnored |= alt.AnswerIgnored;
+            }
+            if (answerIgnored) ignoredAnswers.Add(ColumnName(s));
+
+            var result = ok                  ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
                        : IsConsoleIssue(r.Output) ? "CHECK: console call"                   // see IsConsoleIssue below
                        : r.TimedOut            ? "TIMEOUT"
                        : !r.Output.Any(char.IsLetterOrDigit) ? "FAIL (no output)"          // the program printed nothing
                        :                         "FAIL";
-            scenarioResults.Add(new(s, result, r.Output, r.AnswerOutput));
+            scenarioResults.Add(new(s, result, r.Output, r.AnswerOutput, typed));
         }
 
         // ---------- 2e. Rubric points ----------
@@ -380,7 +394,7 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                 .Concat(scenarios.Select(_ => "NOT RUN"))
                 .Concat(staticChecks.Select(_ => ""))));
         reportRows.Add(new ReportRow(student, "GRADER ERROR", ex.Message, zero, 0, 0,
-            scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "")).ToList(), staticChecks.Select(_ => "").ToList(),
+            scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "", s.Inputs)).ToList(), staticChecks.Select(_ => "").ToList(),
             ["GRADER ERROR (0 points)"], []));
     }
 
@@ -519,11 +533,13 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         <style>
         :root { --bg:#fff; --fg:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7; --head:#f5f5f7; --code:#fafafa;
                 --pass:#dcf5e3; --pass-fg:#13652b; --fail:#fde2df; --fail-fg:#a3221a;
-                --warn:#fff2cc; --warn-fg:#7a5000; --grey:#ededf0; --grey-fg:#555; color-scheme:light; }
+                --warn:#fff2cc; --warn-fg:#7a5000; --grey:#ededf0; --grey-fg:#555;
+                --ok:#e9f5d3; --ok-fg:#3f6212; --meter:#34a853; color-scheme:light; }
         @media (prefers-color-scheme: dark) {
           :root { --bg:#1c1c1e; --fg:#f2f2f7; --muted:#a1a1a6; --line:#3a3a3c; --head:#2c2c2e; --code:#111;
                   --pass:#173d22; --pass-fg:#86e3a0; --fail:#4a1c19; --fail-fg:#ff9b92;
-                  --warn:#463712; --warn-fg:#ffd36b; --grey:#2c2c2e; --grey-fg:#bbb; color-scheme:dark; } }
+                  --warn:#463712; --warn-fg:#ffd36b; --grey:#2c2c2e; --grey-fg:#bbb;
+                  --ok:#2b3a14; --ok-fg:#c5e48f; --meter:#4cc26e; color-scheme:dark; } }
         body { margin:0; padding:16px; font:13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--fg); }
         h1 { font-size:18px; margin:0 0 4px; }
         .bar { display:flex; gap:8px; align-items:center; margin:8px 0 12px; flex-wrap:wrap; color:var(--muted); }
@@ -532,12 +548,26 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         table { border-collapse:separate; border-spacing:0; }
         th, td { border-right:1px solid var(--line); border-bottom:1px solid var(--line); padding:6px 8px; vertical-align:top; text-align:left; }
         thead th { position:sticky; top:0; z-index:2; background:var(--head); min-width:150px; max-width:220px; font-weight:600; }
-        th.name { position:sticky; left:0; z-index:1; background:var(--head); min-width:170px; }
+        th.name { position:sticky; left:0; z-index:1; background:var(--head); min-width:200px; }
+        /* score block in the student column: total, a meter, and one chip per phase */
+        .who { font-size:14px; }
+        .score { margin-top:4px; font-variant-numeric:tabular-nums; }
+        .score b { font-size:26px; line-height:1; }
+        .score span { color:var(--muted); font-weight:400; font-size:13px; margin-left:3px; }
+        .meter { height:5px; margin:6px 0 7px; border-radius:3px; background:var(--line); overflow:hidden; }
+        .meter i { display:block; height:100%; background:var(--meter); }
+        .phases { display:flex; gap:4px; flex-wrap:wrap; }
+        .ph { padding:2px 6px; border-radius:5px; font-size:11px; font-weight:500; font-variant-numeric:tabular-nums; }
+        .ph b { font-size:13px; margin-left:2px; }
+        .s40 { background:var(--pass); color:var(--pass-fg); }
+        .s35 { background:var(--ok); color:var(--ok-fg); }
+        .s20 { background:var(--warn); color:var(--warn-fg); }
+        .s0  { background:var(--fail); color:var(--fail-fg); }
+        .pen { margin-top:5px; font-size:11px; font-weight:500; color:var(--fail-fg); }
         thead th.name { z-index:3; }
         th.edge { box-shadow:inset 0 3px 0 #e0a800; }
         th.code { box-shadow:inset 0 3px 0 #7d7dff; }
         .x { color:var(--muted); font-weight:400; font-size:11px; margin-top:3px; }
-        .pts { display:block; font-weight:400; color:var(--muted); font-size:12px; margin-top:2px; }
         td { min-width:150px; }
         td.pass { background:var(--pass); color:var(--pass-fg); }
         td.fail { background:var(--fail); color:var(--fail-fg); }
@@ -564,7 +594,7 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
           <select id="student" onchange="applyFilter()"><option value="">All students</option>
         """);
     foreach (var row in rows)
-        h.Append($"<option value=\"{E(row.Student)}\">{E(row.Student)}{(row.Review.Count > 0 ? " (review)" : "")}</option>");
+        h.Append($"<option value=\"{E(row.Student)}\">{E(row.Student)} – {row.Total}/{40 * row.Points.Count}{(row.Review.Count > 0 ? " (review)" : "")}</option>");
     h.Append("""
           </select>
           <label><input type="checkbox" id="reviewOnly" onchange="applyFilter()"> Only students needing review</label>
@@ -578,6 +608,7 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
     foreach (var s in scenarios)
         h.Append($"<th class=\"{(s.Edge ? "edge" : "")}\">{E(ColumnName(s))}" +
                  $"<div class=\"x\">typed: {string.Join(" · ", s.Inputs.Select(Typed))}</div>" +
+                 (s.AltInputs is null ? "" : $"<div class=\"x\">or: {string.Join(" · ", s.AltInputs.Select(Typed))}</div>") +
                  $"<div class=\"x\">expects: {E(s.Check.Description)}</div></th>");
     foreach (var c in staticChecks)
         h.Append($"<th class=\"code\">{E(c.Name)}<div class=\"x\">" +
@@ -587,9 +618,16 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
     foreach (var row in rows)
     {
         var needsReview = row.Review.Count > 0;
-        h.Append($"<tr data-student=\"{E(row.Student)}\"{(needsReview ? " class=\"review\"" : "")}><th class=\"name\">{E(row.Student)}<span class=\"pts\">" +
-                 $"P1 {row.Points[0]} · P2 {row.Points[1]} · P3 {row.Points[2]}" +
-                 (row.Penalty > 0 ? $" − {row.Penalty} setup" : "") + $" = {row.Total}</span></th>");
+        // score block: big total out of the maximum, a meter, one colored chip per phase (40/35/20/0)
+        int max = 40 * row.Points.Count;
+        string Chip(int phase, int pts) =>
+            $"<span class=\"ph {(pts >= 40 ? "s40" : pts >= 35 ? "s35" : pts >= 20 ? "s20" : "s0")}\">P{phase}<b>{pts}</b></span>";
+        h.Append($"<tr data-student=\"{E(row.Student)}\"{(needsReview ? " class=\"review\"" : "")}><th class=\"name\">" +
+                 $"<div class=\"who\">{E(row.Student)}</div>" +
+                 $"<div class=\"score\"><b>{row.Total}</b><span>/ {max}</span></div>" +
+                 $"<div class=\"meter\"><i style=\"width:{(max == 0 ? 0 : 100 * row.Total / max)}%\"></i></div>" +
+                 $"<div class=\"phases\">{string.Concat(row.Points.Select((p, i) => Chip(i + 1, p)))}</div>" +
+                 (row.Penalty > 0 ? $"<div class=\"pen\">−{row.Penalty} setup penalty</div>" : "") + "</th>");
 
         var buildCss = row.Build == "OK" ? "pass" : row.Build.StartsWith("REBUILT") ? "warn" : "fail";
         h.Append(row.BuildErrors == ""
@@ -599,11 +637,11 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
             ? $"<td class=\"warn rev\"><ul>{string.Concat(row.Review.Select(r => $"<li>{E(r)}</li>"))}</ul></td>"
             : "<td class=\"rev\"></td>");
 
-        foreach (var (s, result, output, answers) in row.Runs)
+        foreach (var (s, result, output, answers, typed) in row.Runs)
         {
             if (result == "NOT RUN") { h.Append("<td class=\"grey\">NOT RUN</td>"); continue; }
             h.Append($"<td class=\"{Css(result)}\"><details><summary>{E(result)}</summary>" +
-                     $"<div class=\"lbl\">Typed</div><pre>{string.Join("\n", s.Inputs.Select(Typed))}</pre>" +
+                     $"<div class=\"lbl\">Typed</div><pre>{string.Join("\n", typed.Select(Typed))}</pre>" +
                      $"<div class=\"lbl\">Printed</div><pre>{E(Cut(output))}</pre>" +
                      $"<div class=\"lbl\">Answers checked (menus and prompts removed)</div><pre>{E(Cut(answers.Trim()))}</pre></details></td>");
         }
@@ -1091,7 +1129,8 @@ static string NormalizeType(string t) => t.Replace(" ", "").Replace("System.", "
 
 
 // ================= TYPES =================
-record Scenario(int Phase, string Command, string Name, string[] Inputs, Check Check, bool Edge = false);
+// AltInputs: another input order the assignment allows; the test passes if either order does
+record Scenario(int Phase, string Command, string Name, string[] Inputs, Check Check, bool Edge = false, string[]? AltInputs = null);
 record Check(string Description, Func<RunResult, bool> Test);
 record ReportRow(string Student, string Build, string BuildErrors, List<int> Points, int Penalty, int Total,
                  List<ScenarioResult> Runs, List<string> StaticResults, List<string> Review,
@@ -1105,6 +1144,7 @@ record RunResult(int ExitCode, string Output, bool TimedOut)
     // What the program printed for an unknown command (compared with help)
     public string UnknownCommandOutput { get; init; } = "";
 }
-record ScenarioResult(Scenario Scenario, string Result, string Output, string AnswerOutput);
+// Typed: the inputs of the run shown in the report (AltInputs when only the other order passed)
+record ScenarioResult(Scenario Scenario, string Result, string Output, string AnswerOutput, string[] Typed);
 record BuildResult(string Output, string? Dll);
 // =========================================
