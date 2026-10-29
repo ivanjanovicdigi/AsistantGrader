@@ -5,7 +5,7 @@ Automatic grader for the **"Asistent"** assignment in Programming 1 (C# / .NET).
 For every student it produces:
 
 - **`results.csv`**: one row per student with points and every test result (opens directly in Excel).
-- **`report.html`**: the same results in a browser. Click any cell to see exactly what was typed and what the program printed.
+- **`report.html`**: the same results in a browser. Click any cell to see exactly what was typed and what the program printed. Filter to one student, or to only the students that need a manual look.
 - **`logs/<Student>/`**: the full output of every test run, plus build errors.
 
 > **Student data never belongs in this repo.** `submissions/`, `logs/`, `results.csv`, `report.html` and `repos.txt` are in `.gitignore`. Keep it that way.
@@ -82,6 +82,23 @@ Open `results.csv` in Excel (`;` separator, works with Slovak regional settings)
 ---
 
 ## What the results mean
+
+### Review column: what to check by hand
+
+The **Review** column (next to *Total* in `results.csv`, after *Build* in `report.html`) lists what the grader isn't sure about. **An empty cell means the points can be taken as they are.** Otherwise, look at the listed tests before giving the points:
+
+| Reason | What to look at |
+|---|---|
+| `Answer ignored as menu/prompt` | The test failed, but the expected answer was printed on a line the grader treated as menu or prompt text. Probably a false fail. |
+| `One result away from more points` | The phase would get more points (shown as `+5`, `+15`…) if this one test or code check passed. A false fail here costs the most, e.g. a `0` inside an error message. Only listed for phases that already have points. |
+| `Code check found no command handler` | `NO BRANCH`: the command may be missing, or handled in a way the grader doesn't recognise. |
+| `Crashed on Console.ReadKey/Clear` | Fails only because the grader types the input. |
+| `Timeout` | The program may be waiting for something (e.g. "press any key") rather than hanging. |
+| `REBUILT …`, `BUILD FAILED`, `NO PROJECT`, `GRADER ERROR` | Setup penalty or 0 points: make sure it's deserved (e.g. the right project was picked). |
+
+An ordinary `FAIL` is not listed: it's a clear result.
+
+In `report.html`, students needing review have a yellow mark by their name. Use the **student dropdown** to show one student at a time (`(review)` marks those needing review) and **Only students needing review** to hide the rest. The two filters work together.
 
 ### Test results
 

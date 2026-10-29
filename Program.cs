@@ -223,7 +223,7 @@ var commandWords = scenarios.Select(s => s.Inputs[0])
 var reportRows = new List<ReportRow>();
 var results = new StringBuilder();
 results.AppendLine(string.Join(";",
-    new[] { "Student", "Build", "P1", "P2", "P3", "Setup penalty", "Total" }
+    new[] { "Student", "Build", "P1", "P2", "P3", "Setup penalty", "Total", "Review" }
         .Concat(scenarios.Select(ColumnName))
         .Concat(staticChecks.Select(c => c.Name))));
 
@@ -316,6 +316,7 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
         }
 
         var scenarioResults = new List<ScenarioResult>();
+        var ignoredAnswers  = new List<string>(); // tests that would pass if menus/prompts weren't removed
         foreach (var s in scenarios)
         {
             if (dll is null) { scenarioResults.Add(new(s, "NOT RUN", "", "")); continue; }
@@ -338,7 +339,8 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
             };
 
             bool ok = s.Check.Test(r);
-            var result = ok                    ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
+            if (!ok && s.Check.Test(r with { AnswerOutput = r.Output })) ignoredAnswers.Add(ColumnName(s));
+            var result = ok                   ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
                        : IsConsoleIssue(r.Output) ? "CHECK: console call"                   // see IsConsoleIssue below
                        : r.TimedOut            ? "TIMEOUT"
                        : !r.Output.Any(char.IsLetterOrDigit) ? "FAIL (no output)"          // the program printed nothing
@@ -351,15 +353,20 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
         var points = new[] { 1, 2, 3 }.Select(phase => PhasePoints(scenarioResults, codeResults, phase, dll != null)).ToList();
         var total  = Math.Max(0, points.Sum() - penalty);
 
+        // ---------- 2f. What to check by hand ----------
+        var review = ReviewReasons(buildStatus, scenarioResults, codeResults, ignoredAnswers, points);
+        if (review.Count > 0) Console.WriteLine($"   needs review: {review.Count} reason(s)");
+
         results.AppendLine(string.Join(";",
             new[] { student, buildStatus }
                 .Concat(points.Select(p => p.ToString()))
                 .Append(penalty == 0 ? "" : $"-{penalty}")
                 .Append(total.ToString())
+                .Append(string.Join(" | ", review).Replace(';', ','))
                 .Concat(scenarioResults.Select(x => x.Result))
                 .Concat(staticResults)));
 
-        reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults));
+        reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults, review));
     }
     catch (Exception ex)
     {
@@ -368,11 +375,12 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
 
         var zero = new List<int> { 0, 0, 0 };
         results.AppendLine(string.Join(";",
-            new[] { student, "GRADER ERROR", "0", "0", "0", "", "0" }
+            new[] { student, "GRADER ERROR", "0", "0", "0", "", "0", "GRADER ERROR (0 points)" }
                 .Concat(scenarios.Select(_ => "NOT RUN"))
                 .Concat(staticChecks.Select(_ => ""))));
         reportRows.Add(new ReportRow(student, "GRADER ERROR", ex.Message, zero, 0, 0,
-            scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "")).ToList(), staticChecks.Select(_ => "").ToList()));
+            scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "")).ToList(), staticChecks.Select(_ => "").ToList(),
+            ["GRADER ERROR (0 points)"]));
     }
 
     SaveResults();
@@ -422,6 +430,66 @@ static int PhasePoints(List<ScenarioResult> results, List<(StaticCheck Check, st
 }
 
 static string ColumnName(Scenario s) => $"P{s.Phase} {s.Name}{(s.Edge ? " [edge]" : "")}";
+
+// Results the grader can't be sure about, so the teacher should look at them before giving the points.
+// An ordinary FAIL is not listed unless fixing that one result would change the points.
+static List<string> ReviewReasons(string build, List<ScenarioResult> runs, List<(StaticCheck Check, string Result)> code,
+                                  List<string> ignoredAnswers, List<int> points)
+{
+    var reasons = new List<string>();
+    void Add(string what, IEnumerable<string> items)
+    {
+        var list = items.Distinct().ToList();
+        if (list.Count > 0) reasons.Add($"{what}: {string.Join(", ", list)}");
+    }
+
+    if (build != "OK")
+        reasons.Add(build.StartsWith("REBUILT") ? $"{build} (setup penalty taken off)" : $"{build} (0 points)");
+
+    // The expected answer was printed, but on a line the grader treated as menu or prompt. Usually that's
+    // right (a menu "4. help", an array printed back), so only listed when counting them would add points.
+    foreach (var phase in new[] { 1, 2, 3 })
+    {
+        var ignored = runs.Where(x => x.Scenario.Phase == phase && ignoredAnswers.Contains(ColumnName(x.Scenario))).ToList();
+        if (ignored.Count == 0) continue;
+        var alt  = runs.Select(x => ignored.Contains(x) ? x with { Result = "PASS" } : x).ToList();
+        int gain = PhasePoints(alt, code, phase, true) - points[phase - 1];
+        if (gain > 0) Add($"Answer ignored as menu/prompt (+{gain} if counted)", ignored.Select(x => ColumnName(x.Scenario)));
+    }
+    Add("Crashed on Console.ReadKey/Clear", runs.Where(x => x.Result.StartsWith("CHECK")).Select(x => ColumnName(x.Scenario)));
+    Add("Timeout", runs.Where(x => x.Result == "TIMEOUT").Select(x => ColumnName(x.Scenario)));
+    // NO BRANCH for a command that works in the tests: it exists, the grader just didn't find it in the code
+    Add("Code check found no handler for a working command", code
+        .Where(c => c.Result == "NO BRANCH" && c.Check.Command is string cmd
+                    && runs.Any(x => !x.Scenario.Edge && x.Scenario.Inputs.Contains(cmd) && x.Result.StartsWith("PASS")))
+        .Select(c => c.Check.Name));
+
+    // One result away: in a phase that already has points, would this one result passing give more?
+    // That is where a false fail (e.g. a 0 inside an error message) costs the most.
+    if (runs.Any(x => x.Result != "NOT RUN"))
+    {
+        var near = new List<string>();
+        for (int i = 0; i < runs.Count; i++)
+        {
+            int phase = runs[i].Scenario.Phase;
+            if (runs[i].Result.StartsWith("PASS") || points[phase - 1] == 0) continue;
+            var alt = runs.ToList();
+            alt[i] = alt[i] with { Result = "PASS" };
+            int gain = PhasePoints(alt, code, phase, true) - points[phase - 1];
+            if (gain > 0) near.Add($"{ColumnName(runs[i].Scenario)} (+{gain})");
+        }
+        for (int i = 0; i < code.Count; i++)
+        {
+            if (code[i].Check.Phase is not int phase || code[i].Result == "PASS" || points[phase - 1] == 0) continue;
+            var alt = code.ToList();
+            alt[i] = (alt[i].Check, "PASS");
+            int gain = PhasePoints(runs, alt, phase, true) - points[phase - 1];
+            if (gain > 0) near.Add($"{code[i].Check.Name} (+{gain})");
+        }
+        Add("One result away from more points", near);
+    }
+    return reasons;
+}
 // ==========================================================
 
 
@@ -475,6 +543,9 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         td.warn { background:var(--warn); color:var(--warn-fg); }
         td.grey { background:var(--grey); color:var(--grey-fg); }
         summary { cursor:pointer; font-weight:600; }
+        tr.review th.name { box-shadow:inset 4px 0 0 #e0a800; }
+        .rev { min-width:260px; max-width:340px; }
+        .rev ul { margin:0; padding-left:16px; }
         .lbl { font-size:11px; color:var(--muted); margin-top:6px; }
         pre { white-space:pre-wrap; word-break:break-word; max-width:380px; max-height:320px; overflow:auto; margin:3px 0 6px;
               padding:6px; background:var(--code); color:var(--fg); border:1px solid var(--line); border-radius:4px;
@@ -484,10 +555,18 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         <div class="bar">
           <button onclick="document.querySelectorAll('details').forEach(d => d.open = true)">Expand all</button>
           <button onclick="document.querySelectorAll('details').forEach(d => d.open = false)">Collapse all</button>
+          <select id="student" onchange="applyFilter()"><option value="">All students</option>
+        """);
+    foreach (var row in rows)
+        h.Append($"<option value=\"{E(row.Student)}\">{E(row.Student)}{(row.Review.Count > 0 ? " (review)" : "")}</option>");
+    h.Append("""
+          </select>
+          <label><input type="checkbox" id="reviewOnly" onchange="applyFilter()"> Only students needing review</label>
           <span>Click a result to see what was typed and what the program printed.
-          Yellow top border = edge case, blue = code check. ␣ = a trailing space.</span>
+          Yellow top border = edge case, blue = code check. ␣ = a trailing space.
+          A yellow name = check the Review column before giving the points.</span>
         </div>
-        <div class="wrap"><table><thead><tr><th class="name">Student</th><th>Build</th>
+        <div class="wrap"><table><thead><tr><th class="name">Student</th><th>Build</th><th class="rev">Review</th>
         """);
 
     foreach (var s in scenarios)
@@ -501,7 +580,8 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
 
     foreach (var row in rows)
     {
-        h.Append($"<tr><th class=\"name\">{E(row.Student)}<span class=\"pts\">" +
+        var needsReview = row.Review.Count > 0;
+        h.Append($"<tr data-student=\"{E(row.Student)}\"{(needsReview ? " class=\"review\"" : "")}><th class=\"name\">{E(row.Student)}<span class=\"pts\">" +
                  $"P1 {row.Points[0]} · P2 {row.Points[1]} · P3 {row.Points[2]}" +
                  (row.Penalty > 0 ? $" − {row.Penalty} setup" : "") + $" = {row.Total}</span></th>");
 
@@ -509,6 +589,9 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         h.Append(row.BuildErrors == ""
             ? $"<td class=\"{buildCss}\">{E(row.Build)}</td>"
             : $"<td class=\"{buildCss}\"><details><summary>{E(row.Build)}</summary><pre>{E(row.BuildErrors)}</pre></details></td>");
+        h.Append(needsReview
+            ? $"<td class=\"warn rev\"><ul>{string.Concat(row.Review.Select(r => $"<li>{E(r)}</li>"))}</ul></td>"
+            : "<td class=\"rev\"></td>");
 
         foreach (var (s, result, output, answers) in row.Runs)
         {
@@ -522,7 +605,18 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
             h.Append($"<td class=\"{Css(result)}\">{E(result)}</td>");
         h.Append("</tr>");
     }
-    h.Append($"</tbody></table></div><p class=\"x\">Generated {DateTime.Now:yyyy-MM-dd HH:mm}</p></body></html>");
+    h.Append($"</tbody></table></div><p class=\"x\">Generated {DateTime.Now:yyyy-MM-dd HH:mm}</p>");
+    // show one student (dropdown) and/or only those needing review (checkbox)
+    h.Append("""
+        <script>
+        function applyFilter() {
+          const name = document.getElementById('student').value;
+          const reviewOnly = document.getElementById('reviewOnly').checked;
+          document.querySelectorAll('tbody tr').forEach(r =>
+            r.hidden = (name !== '' && r.dataset.student !== name) || (reviewOnly && !r.classList.contains('review')));
+        }
+        </script></body></html>
+        """);
     return h.ToString();
 }
 // ========================================================
@@ -967,7 +1061,7 @@ static string NormalizeType(string t) => t.Replace(" ", "").Replace("System.", "
 record Scenario(int Phase, string Command, string Name, string[] Inputs, Check Check, bool Edge = false);
 record Check(string Description, Func<RunResult, bool> Test);
 record ReportRow(string Student, string Build, string BuildErrors, List<int> Points, int Penalty, int Total,
-                 List<ScenarioResult> Runs, List<string> StaticResults);
+                 List<ScenarioResult> Runs, List<string> StaticResults, List<string> Review);
 record StaticCheck(string Name, string? Command, string ReturnType, string[] ParamTypes, int Depth = 0, int? Phase = null);
 record FunctionInfo(string Name, TypeSyntax ReturnType, ParameterListSyntax Parameters, SyntaxNode Node);
 record RunResult(int ExitCode, string Output, bool TimedOut)
