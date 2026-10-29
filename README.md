@@ -91,7 +91,7 @@ Open `results.csv` in Excel (`;` separator, works with Slovak regional settings)
 | `PASS (no exit)` | Correct answer, but `exit` did not end the program. Counts as a pass. |
 | `FAIL` | The check did not succeed. |
 | `FAIL (no output)` | The program printed nothing at all. |
-| `TIMEOUT` | The program hung and was stopped after 5 seconds. |
+| `TIMEOUT` | The program hung and was stopped after 5 seconds, or printed more than 1 MB (an endless loop). |
 | `CHECK: console call` | Crashed on `Console.ReadKey()` / `Console.Clear()`. This happens only because the grader types the input, so check it manually. |
 | `NOT RUN` | The program could not be built. |
 
@@ -110,11 +110,15 @@ Results are saved after every student, so if the run stops halfway the students 
 
 When a repo contains several projects (e.g. class exercises next to the assignment), the grader picks the one whose code mentions the most command names (`"sum"`, `"rect"`, …).
 
+Students' programs always run on the newest .NET installed (.NET 10), even when their project targets an older version such as `net8.0`. Without this, a correct program built for .NET 8 would fail every test with "You must install or update .NET".
+
 ### Code checks (last columns)
 
-These read the source code instead of running it and check the Phase 2 structure: that `sum`, `odm`, `find`, `help`, `rect` each call their own `void` function without parameters, and that `area`, `perimeter`, `diagonal` call a function taking two numbers and returning one. Function names don't matter. `NO BRANCH` means the grader couldn't find where that command is handled.
+These read the source code instead of running it and check the Phase 2 structure the assignment requires: that `sum`, `odm`, `find`, `help`, `rect` each call their own `void` function without parameters, and that `area`, `perimeter`, `diagonal` call a function taking two numbers and returning one. Function names don't matter.
 
-**Code checks do not affect the points**; they are information for the teacher.
+**They count for Phase 2 points** (see *Scoring*).
+
+`NO BRANCH` means the grader couldn't find where that command is handled. It counts as a fail and is shown in yellow: it is right when the command is missing, but the grader can also miss unusual code (e.g. commands kept in a `Dictionary`), so look at the code before taking points off.
 
 ---
 
@@ -131,6 +135,8 @@ Per phase, following the assignment's rubric:
 
 A command "works" when **all** its test scenarios pass (each command is tested on at least two inputs). Edge cases (marked `[edge]`) only decide between 35 and 40.
 
+**Phase 2 also requires functions.** `area`, `perimeter`, `diagonal` and `rect` work only when their tests pass **and** their code check passes. The code checks for `sum`, `odm`, `find`, `help` count as four more Phase 2 commands. So a student whose rectangle works but computes everything inline gets 20 for Phase 2, not 35 or 40.
+
 **Setup penalty:** if the grader had to rebuild the code with its own project, `setupPenalty` points (default 10) are taken off the total. They appear in the *Setup penalty* column.
 
 ### What the edge cases check
@@ -138,7 +144,9 @@ A command "works" when **all** its test scenarios pass (each command is tested o
 - Text instead of a number (`abc`) must be rejected: no crash, and it must not silently become `0`. Asking again or returning to the menu are both fine.
 - Square root of a negative number: no crash, no `NaN`.
 - Rectangle with a negative, zero or text side must be rejected.
-- Array with a trailing space (`50 10 70 40 `) or letters (`50 x 70`), and searching for a missing or non-numeric value.
+- Unknown command (`xyz`): no crash, and the program must print some message, not just show the menu again.
+- Array with a trailing space (`50 10 70 40 `) or letters (`50 x 70`), and searching for a non-numeric value.
+- Searching the array for a missing value must answer `-1` or "not found" (a 1-based program printing position `0` fails).
 - Inside `rect` / `array` mode, `exit` may either end the program or return to the main menu; the tests type `exit` twice to allow both.
 
 ---
@@ -175,28 +183,42 @@ Available checks:
 | `Sequence("10 40 50 70")` | these numbers appear in this order |
 | `NoCrash("NaN")` | no crash, something was printed, and none of the listed numbers/words appear |
 | `RejectsText("40", "42")` | for text typed as a number: no crash, no `0`, and not `40` without `42` |
-| `Found("8", "9")` / `NotFound()` | a position or a found / not-found style answer |
+| `Found("8", "9")` | one of these positions, or a "found" answer (nachádza, áno, true…); never with a `-1` |
+| `NotFound()` | `-1`, or a "not found" answer (nenachádza, nie, false…) |
+| `HelpLists("sum", "odm")` | each word is printed more often than after an unknown command |
+| `Responds()` | the program printed something besides its menus and prompts |
 | `AllOf(a, b)` | all the given checks pass |
 
-**Numbers** are compared at the precision the student printed (`8.6023` accepts `8.6`, `8,60`, `8.602325…`, but not `9`); whole numbers must be exact; `13` never counts as `3`. **Words** ignore case and diacritics and must start a word (`nachadz` matches `nachádza` but not `nenachádza`). They also work when Windows garbles Slovak letters in the output.
+**Numbers** are compared at the precision the student printed (`8.6023` accepts `8.6`, `8,60`, `8.602325…`, but not `9`); whole numbers must be exact; `13` never counts as `3`. **Words** ignore case and diacritics and must start a word (`nachadz` matches `nachádza` but not `nenachádza`). Short answer words (`nie`, `not`, `áno`, `true`…) must be the whole word, so `nie` doesn't match `niečo`. Words also work when Windows garbles Slovak letters in the output.
 
-**Menus and prompts** don't count for number checks, so a `4` in "4. help" can't pass `odm 16`. Before the tests, each program is run once with just `exit` (and once entering `rect` / `array` mode with other numbers) to capture what it prints anyway: those lines, and prompts glued to the next line ("Vyber 1-5: Výsledok: 4"), are ignored when looking for numbers. Word checks still see the whole output. The runs are in `BASELINES` below the scenarios and saved as `logs/<Name>/baseline *.log`; *Printed* in the report still shows the full output.
+**Labels are not answers:** "Pozícia: -1" is a not-found answer, so `find found` fails on it. This catches a program that reads the sentence and the word in the wrong order.
+
+**Menus and prompts don't count as answers.** Before the tests, each program is run without being asked anything, to capture what it prints anyway:
+
+- once with just `exit` (the main menu)
+- once entering `rect` with other numbers than the tests use (the rect menu)
+- for each array test, with that test's own array but no question, so an array the program prints back ("Pole: 50 10 70 40") can't answer `min`
+- once with an unknown command, to compare with `help`: a menu printed after every command doesn't count as help
+
+Those lines, and prompts glued to the next line ("Vyber 1-5: Výsledok: 4"), are ignored when checking answers, so a `4` in "4. help" can't pass `odm 16`. `help` and other word checks still see the whole output. The runs are in `BASELINES` below the scenarios and saved as `logs/<Name>/baseline *.log`. In the report, each cell shows both *Printed* (everything) and *Answers checked* (with the menus and prompts removed).
 
 ### Code checks (`STATIC ANALYSIS: CHECKS`)
 
 ```csharp
-new("P2 area: num(num,num)", "area", "num", ["num", "num"], Depth: 1),
+new("P2 area: num(num,num)", "area", "num", ["num", "num"], Depth: 1, Phase: 2),
 //   column name               command  return  parameter types
 ```
 
-Types: `void`, `int`, `double`, …, `"num"` = any number type, `"*"` = anything. `Depth: 1` allows the command to reach the function through one helper function.
+Types: `void`, `int`, `double`, …, `"num"` = any number type, `"*"` = anything. `Depth: 1` allows the command to reach the function through one helper function. `Phase: 2` makes the check count for that phase's points; leave it out for a column that is only information.
 
 ---
 
 ## Known limits: review these manually
 
-- `help lists commands` passes if the command names appear **anywhere** in the output, including a welcome message.
-- Number checks ignore the program's menus and prompts (see *Menus and prompts* above), but a number in any other text still counts, e.g. "Zadaj 2 čísla" printed only after typing `sum`.
+- `help lists commands` can fail a working help if the program also lists all commands in its "unknown command" message.
+- Answer checks ignore the program's menus and prompts (see *Menus and prompts* above), but a number in any other text still counts, e.g. "Zadaj 2 čísla" printed only after typing `sum`.
+- A line the program prints in both the test and its baseline is ignored, so a program that prints a result on its own (without being asked) and then again when asked can fail that test.
+- Code checks pass when **any** place handling the command calls a matching function: `find` is also a command in array mode, so a matching function there also passes the Phase 2 `find` check.
 - The `0` checks for text input can fail a correct program whose error message itself contains a 0 (e.g. "zadaj číslo väčšie ako 0"). Check the log.
 - Commit dates come from the student's computer, not from when they pushed.
 - The **No AI** rule cannot be checked automatically.

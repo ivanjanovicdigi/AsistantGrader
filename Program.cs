@@ -64,7 +64,9 @@ var setupPenalty    = 10;
 var scenarios = new List<Scenario>
 {
     // ---------- PHASE 1: sum, odm, find, help ----------
-    new(1, "help", "help lists commands", ["help", "exit"],                HasAll("sum", "odm", "find")),
+    // help must print the command names more often than an unknown command does,
+    // so a menu shown anyway doesn't count as a working help
+    new(1, "help", "help lists commands", ["help", "exit"],                HelpLists("sum", "odm", "find")),
 
     new(1, "sum",  "sum 522+3",           ["sum", "522", "3", "exit"],     Has("525")),
     new(1, "sum",  "sum -5+2",            ["sum", "-5", "2", "exit"],      Has("-3")),
@@ -72,7 +74,8 @@ var scenarios = new List<Scenario>
     new(1, "odm",  "odm 16",              ["odm", "16", "exit"],           Has("4")),
     new(1, "odm",  "odm 2",               ["odm", "2", "exit"],            Has("1.4142")),
 
-    // sentence first, then the substring; position may be 0-based (8) or 1-based (9)
+    // sentence first, then the substring; position may be 0-based (8) or 1-based (9).
+    // A -1 fails "find found": that is what a program reading the inputs in the wrong order prints.
     new(1, "find", "find found",          ["find", "Dnes je pekny den", "pekny", "exit"], Found("8", "9")),
     new(1, "find", "find not found",      ["find", "Dnes je pekny den", "auto", "exit"],  NotFound()),
 
@@ -86,7 +89,8 @@ var scenarios = new List<Scenario>
     // sum: if "abc" became 0, the program prints 0 + 40 = 40, often as just "40" -> RejectsText
     new(1, "edge", "sum with text",       ["sum", "abc", "40", "abc", "2", "exit"], RejectsText("40", "42"), Edge: true),
     new(1, "edge", "odm with text",       ["odm", "abc", "16", "exit"],             NoCrash("0"), Edge: true),
-    new(1, "edge", "unknown command",     ["xyz", "exit"],                  NoCrash(),      Edge: true),
+    // must react with some message, not silently show the menu again
+    new(1, "edge", "unknown command",     ["xyz", "exit"],                  AllOf(NoCrash(), Responds()), Edge: true),
 
     // ---------- PHASE 2: rect mode (area, perimeter, diagonal) ----------
     // "exit" twice: inside a mode, exit may go back to the main menu; the second one ends the program
@@ -131,40 +135,47 @@ var scenarios = new List<Scenario>
     // text must not become 0: a minimum of 0, or finding 0 (position 1 / index 0), means silent zero
     new(3, "edge", "array with text",      ["array", "50 x 70", "50 10 70 40", "min", "exit", "exit"],   NoCrash("0"), Edge: true),
     new(3, "edge", "find with text",       ["array", "0 50 40 70", "find", "abc", "70", "exit", "exit"], NoCrash("0", "1"), Edge: true),
-    new(3, "edge", "find missing value",   ["array", "50 10 70 40", "find", "99", "exit", "exit"],       NoCrash(), Edge: true),
+    new(3, "edge", "find missing value",   ["array", "50 10 70 40", "find", "99", "exit", "exit"],       AllOf(NoCrash(), NotFound()), Edge: true),
 };
 
 // ---------- BASELINES: what the program prints without being asked anything ----------
 // Before the tests, each program is run with these inputs to capture its menus and prompts
-// ("1. sum", "4. help", "Vyber 1-5:"). Number checks then ignore that text, so a "4" in the menu
-// can't pass "odm 16". A test starting with "rect" / "array" uses that mode's baseline, others use "".
-// The mode baselines use different numbers than the tests, so no real answer gets removed.
+// ("1. sum", "4. help", "Vyber 1-5:"). Checks for answers then ignore that text, so a "4" in the
+// menu can't pass "odm 16". A test starting with "rect" also uses the rect baseline. Its numbers
+// differ from the tests, so a result the program prints on its own can't remove a real answer.
 var baselines = new Dictionary<string, string[]>
 {
     [""]      = ["exit"],
     ["rect"]  = ["rect", "2", "9", "exit", "exit"],
-    ["array"] = ["array", "1 2 6", "exit", "exit"],
 };
+// Array tests get their own baseline: the test's inputs up to the first question, then exit.
+// A program that prints the array back ("Pole: 50 10 70 40") would otherwise "answer" min with it.
+string[] arrayQuestions = ["find", "min", "sort"];
+// Compared with help: a menu printed anyway doesn't count as help (see HelpLists)
+string[] unknownCommandInputs = ["xyz", "exit"];
 // =========================================================
 
 
 // ================= STATIC ANALYSIS: CHECKS =================
-// Extra columns for your judgement - they do NOT change the rubric points.
-// new(column name, command, return type, parameter types, Depth)
+// new(column name, command, return type, parameter types, Depth, Phase)
 //   types: "void", "int", "double"...   "num" = any number type   "*" = anything
 //   Depth 0 = the code handling the command must call the function directly (default)
 //   Depth 1 = it may also go through one helper function first
+//   Phase: the check is required for that phase's points. For a command that phase also tests
+//          (area, perimeter, diagonal, rect) it must pass together with the tests; any other
+//          (sum, odm, find, help) counts as one more command of that phase.
+//          Without Phase the check is only a column for your judgement.
 // Function names don't matter.
 var staticChecks = new List<StaticCheck>
 {
-    new("P2 sum: own void() function",  "sum",  "void", []),
-    new("P2 odm: own void() function",  "odm",  "void", []),
-    new("P2 find: own void() function", "find", "void", []),
-    new("P2 help: own void() function", "help", "void", []),
-    new("P2 rect: own void() function", "rect", "void", []),
-    new("P2 area: num(num,num)",        "area",      "num", ["num", "num"], Depth: 1),
-    new("P2 perimeter: num(num,num)",   "perimeter", "num", ["num", "num"], Depth: 1),
-    new("P2 diagonal: num(num,num)",    "diagonal",  "num", ["num", "num"], Depth: 1),
+    new("P2 sum: own void() function",  "sum",  "void", [], Phase: 2),
+    new("P2 odm: own void() function",  "odm",  "void", [], Phase: 2),
+    new("P2 find: own void() function", "find", "void", [], Phase: 2),
+    new("P2 help: own void() function", "help", "void", [], Phase: 2),
+    new("P2 rect: own void() function", "rect", "void", [], Phase: 2),
+    new("P2 area: num(num,num)",        "area",      "num", ["num", "num"], Depth: 1, Phase: 2),
+    new("P2 perimeter: num(num,num)",   "perimeter", "num", ["num", "num"], Depth: 1, Phase: 2),
+    new("P2 diagonal: num(num,num)",    "diagonal",  "num", ["num", "num"], Depth: 1, Phase: 2),
 };
 // ===========================================================
 
@@ -290,26 +301,41 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
         var staticResults = staticChecks.Select(c => RunStaticCheck(roots, functions, c)).ToList();
 
         // ---------- 2d. Functional scenarios ----------
-        // menus and prompts the program prints anyway (see BASELINES)
-        var baselineOutput = new Dictionary<string, string>();
-        if (dll != null)
-            foreach (var (mode, inputs) in baselines)
+        // What the program prints anyway (see BASELINES). Each input list runs once per student.
+        var baselineCache = new Dictionary<string, string>();
+        string Baseline(string[] inputs, string logName)
+        {
+            var key = string.Join("\n", inputs);
+            if (!baselineCache.TryGetValue(key, out var output))
             {
-                var b = Run("dotnet", $"\"{dll}\"", inputs, scenarioTimeout);
-                SaveLog(logsDir, student, $"baseline {(mode == "" ? "main" : mode)}", b.Output);
-                baselineOutput[mode] = b.Output;
+                output = Run("dotnet", $"\"{dll}\"", inputs, scenarioTimeout).Output;
+                SaveLog(logsDir, student, $"baseline {logName}", output);
+                baselineCache[key] = output;
             }
+            return output;
+        }
 
-        var scenarioResults = new List<(Scenario Scenario, string Result, string Output)>();
+        var scenarioResults = new List<ScenarioResult>();
         foreach (var s in scenarios)
         {
-            if (dll is null) { scenarioResults.Add((s, "NOT RUN", "")); continue; }
+            if (dll is null) { scenarioResults.Add(new(s, "NOT RUN", "", "")); continue; }
 
             var r = Run("dotnet", $"\"{dll}\"", s.Inputs, scenarioTimeout);
             SaveLog(logsDir, student, ColumnName(s), r.Output); // what the program printed, for manual review
 
-            var mode = baselineOutput.ContainsKey(s.Inputs[0]) ? s.Inputs[0] : "";
-            r = r with { NumberOutput = WithoutBaseline(r.Output, baselineOutput[""] + "\n" + baselineOutput[mode]) };
+            var baseline = Baseline(baselines[""], "main");
+            if (baselines.TryGetValue(s.Inputs[0], out var modeInputs))
+                baseline += "\n" + Baseline(modeInputs, s.Inputs[0]);
+            if (s.Inputs[0] == "array")
+            {
+                string[] arrayInputs = [.. s.Inputs.TakeWhile(i => !arrayQuestions.Contains(i)), "exit", "exit"];
+                baseline += "\n" + Baseline(arrayInputs, "array " + string.Join(" ", arrayInputs[1..^2]));
+            }
+            r = r with
+            {
+                AnswerOutput         = WithoutBaseline(r.Output, baseline),
+                UnknownCommandOutput = Baseline(unknownCommandInputs, "unknown command"),
+            };
 
             bool ok = s.Check.Test(r);
             var result = ok                    ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
@@ -317,11 +343,12 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                        : r.TimedOut            ? "TIMEOUT"
                        : !r.Output.Any(char.IsLetterOrDigit) ? "FAIL (no output)"          // the program printed nothing
                        :                         "FAIL";
-            scenarioResults.Add((s, result, r.Output));
+            scenarioResults.Add(new(s, result, r.Output, r.AnswerOutput));
         }
 
         // ---------- 2e. Rubric points ----------
-        var points = new[] { 1, 2, 3 }.Select(phase => PhasePoints(scenarioResults, phase, dll != null)).ToList();
+        var codeResults = staticChecks.Zip(staticResults).ToList();
+        var points = new[] { 1, 2, 3 }.Select(phase => PhasePoints(scenarioResults, codeResults, phase, dll != null)).ToList();
         var total  = Math.Max(0, points.Sum() - penalty);
 
         results.AppendLine(string.Join(";",
@@ -345,7 +372,7 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                 .Concat(scenarios.Select(_ => "NOT RUN"))
                 .Concat(staticChecks.Select(_ => ""))));
         reportRows.Add(new ReportRow(student, "GRADER ERROR", ex.Message, zero, 0, 0,
-            scenarios.Select(s => (s, "NOT RUN", "")).ToList(), staticChecks.Select(_ => "").ToList()));
+            scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "")).ToList(), staticChecks.Select(_ => "").ToList()));
     }
 
     SaveResults();
@@ -370,19 +397,27 @@ Console.WriteLine(SaveResults()
 // ================= HELPERS: RUBRIC POINTS =================
 // Per phase: all commands pass + all edge cases pass = 40, all commands pass = 35,
 // at least one command passes = 20, otherwise (or no build) = 0.
-// A command passes when ALL its non-edge scenarios pass.
-static int PhasePoints(List<(Scenario Scenario, string Result, string Output)> results, int phase, bool built)
+// A command passes when ALL its non-edge scenarios pass, and its code check too when that check
+// is required for this phase (e.g. P2 area must work AND call a num(num,num) function).
+// A required code check for a command not tested in this phase (P2 sum) counts as its own command.
+static int PhasePoints(List<ScenarioResult> results, List<(StaticCheck Check, string Result)> code, int phase, bool built)
 {
     if (!built) return 0;
 
-    var inPhase  = results.Where(x => x.Scenario.Phase == phase).ToList();
-    var commands = inPhase.Where(x => !x.Scenario.Edge).GroupBy(x => x.Scenario.Command).ToList();
-    if (commands.Count == 0) return 0;
+    var inPhase = results.Where(x => x.Scenario.Phase == phase).ToList();
+    var works   = inPhase.Where(x => !x.Scenario.Edge).GroupBy(x => x.Scenario.Command)
+                         .ToDictionary(g => g.Key, g => g.All(x => x.Result.StartsWith("PASS")));
+    foreach (var (check, result) in code.Where(c => c.Check.Phase == phase))
+    {
+        var key = check.Command ?? check.Name;
+        works[key] = works.GetValueOrDefault(key, true) && result == "PASS";
+    }
+    if (works.Count == 0) return 0;
 
-    int working  = commands.Count(g => g.All(x => x.Result.StartsWith("PASS")));
+    int working  = works.Values.Count(w => w);
     bool edgesOk = inPhase.Where(x => x.Scenario.Edge).All(x => x.Result.StartsWith("PASS"));
 
-    if (working == commands.Count) return edgesOk ? 40 : 35;
+    if (working == works.Count) return edgesOk ? 40 : 35;
     return working > 0 ? 20 : 0;
 }
 
@@ -398,8 +433,9 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
     string E(string text) => System.Net.WebUtility.HtmlEncode(text);
     string Css(string result) =>
         result.StartsWith("PASS") ? "pass"
-        : result.StartsWith("CHECK") || result == "TIMEOUT" ? "warn"
-        : result is "NOT RUN" or "NO BRANCH" or "" ? "grey"
+        // NO BRANCH costs points but may be the grader's mistake (e.g. commands in a Dictionary): look at it
+        : result.StartsWith("CHECK") || result is "TIMEOUT" or "NO BRANCH" ? "warn"
+        : result is "NOT RUN" or "" ? "grey"
         : result == "OK" ? "pass" : "fail";
     // trailing spaces are invisible, so show them as ␣
     string Typed(string line) => E(line.TrimEnd()) + new string('␣', line.Length - line.TrimEnd().Length);
@@ -459,7 +495,8 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
                  $"<div class=\"x\">typed: {string.Join(" · ", s.Inputs.Select(Typed))}</div>" +
                  $"<div class=\"x\">expects: {E(s.Check.Description)}</div></th>");
     foreach (var c in staticChecks)
-        h.Append($"<th class=\"code\">{E(c.Name)}<div class=\"x\">code check (no points)</div></th>");
+        h.Append($"<th class=\"code\">{E(c.Name)}<div class=\"x\">" +
+                 (c.Phase is int ph ? $"code check, required for P{ph} points" : "code check (no points)") + "</div></th>");
     h.Append("</tr></thead><tbody>");
 
     foreach (var row in rows)
@@ -473,12 +510,13 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
             ? $"<td class=\"{buildCss}\">{E(row.Build)}</td>"
             : $"<td class=\"{buildCss}\"><details><summary>{E(row.Build)}</summary><pre>{E(row.BuildErrors)}</pre></details></td>");
 
-        foreach (var (s, result, output) in row.Runs)
+        foreach (var (s, result, output, answers) in row.Runs)
         {
             if (result == "NOT RUN") { h.Append("<td class=\"grey\">NOT RUN</td>"); continue; }
             h.Append($"<td class=\"{Css(result)}\"><details><summary>{E(result)}</summary>" +
                      $"<div class=\"lbl\">Typed</div><pre>{string.Join("\n", s.Inputs.Select(Typed))}</pre>" +
-                     $"<div class=\"lbl\">Printed</div><pre>{E(Cut(output))}</pre></details></td>");
+                     $"<div class=\"lbl\">Printed</div><pre>{E(Cut(output))}</pre>" +
+                     $"<div class=\"lbl\">Answers checked (menus and prompts removed)</div><pre>{E(Cut(answers.Trim()))}</pre></details></td>");
         }
         foreach (var result in row.StaticResults)
             h.Append($"<td class=\"{Css(result)}\">{E(result)}</td>");
@@ -518,56 +556,82 @@ static Check NoCrash(params string[] forbidden) =>
              && !r.Output.Contains("Unhandled exception")
              && !forbidden.Any(t => OutputHas(r,t)));
 
+// Prints something besides its menus and prompts (e.g. "Neznámy príkaz")
+static Check Responds() =>
+    new("prints a message, not just the menu again", r => r.AnswerOutput.Any(char.IsLetterOrDigit));
+
+// Each word must appear more often than after an unknown command: a menu that is printed
+// anyway (at the start, after every command) then doesn't count as help.
+static Check HelpLists(params string[] words) =>
+    new($"lists {string.Join(", ", words)} (more often than after an unknown command)",
+        r => words.All(w => CountWord(r.Output, w) > CountWord(r.UnknownCommandOutput, w)));
+
 static Check Sequence(string numbers)
 {
     // BigInteger, not int: a student may print a number too long for int, which must not crash the grader
     var expected = numbers.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(n => System.Numerics.BigInteger.Parse(n)).ToArray();
     return new($"numbers in this order: {numbers}", r =>
     {
-        var found = Regex.Matches(r.NumberOutput, @"(?<!\d)-?\d+").Select(m => System.Numerics.BigInteger.Parse(m.Value)).ToArray();
+        var found = Regex.Matches(r.AnswerOutput, @"(?<!\d)-?\d+").Select(m => System.Numerics.BigInteger.Parse(m.Value)).ToArray();
         for (int i = 0; i + expected.Length <= found.Length; i++)
             if (found.Skip(i).Take(expected.Length).SequenceEqual(expected)) return true;
         return false;
     });
 }
 
-// Word stems compared without diacritics, at the start of a word
-static string[] FoundWords()    => ["nachadz", "nasiel", "nasla", "naslo", "najden", "obsahuje", "je vo vete",
-                                    "ano", "yes", "true", "found", "pozici", "index", "position"];
-static string[] NotFoundWords() => ["nenachadz", "nenasiel", "nenasla", "nenaslo", "nenajden", "neobsahuje",
-                                    "nie", "neni", "not", "false"];
+// Compared without diacritics. Stems match the start of a word ("nachadz" -> "nachádza"),
+// whole words only themselves ("nie" doesn't match "niečo", "not" doesn't match "nothing").
+// Labels like "pozícia" / "index" are not answers: "Pozícia: -1" means not found.
+static bool SaysFound(string text) =>
+    new[] { "nachadz", "nasiel", "nasla", "naslo", "najden", "obsahuje", "je vo vete" }.Any(w => HasWord(text, w))
+    || new[] { "ano", "yes", "true", "found" }.Any(w => HasWord(text, w, wholeWord: true));
 
+static bool SaysNotFound(string text) =>
+    new[] { "nenachadz", "nenasiel", "nenasla", "nenaslo", "nenajden", "neobsahuje" }.Any(w => HasWord(text, w))
+    || new[] { "nie", "neni", "not", "false" }.Any(w => HasWord(text, w, wholeWord: true));
+
+// A -1 always fails: a program that reads the inputs in the wrong order prints "Pozícia: -1"
 static Check Found(params string[] positions) =>
-    new($"position {string.Join(" or ", positions)}, or a 'found' answer (nachádza, áno, true...)",
-        r => positions.Any(p => OutputHas(r,p))
-             || (FoundWords().Any(w => OutputHas(r,w)) && !NotFoundWords().Any(w => OutputHas(r,w))));
+    new($"position {string.Join(" or ", positions)}, or a 'found' answer (nachádza, áno, true...), and no -1",
+        r => !HasNumber(r.AnswerOutput, "-1")
+             && (positions.Any(p => HasNumber(r.AnswerOutput, p))
+                 || (SaysFound(r.AnswerOutput) && !SaysNotFound(r.AnswerOutput))));
 
 static Check NotFound() =>
     new("-1, or a 'not found' answer (nenachádza, nie, false...)",
-        r => OutputHas(r,"-1") || NotFoundWords().Any(w => OutputHas(r,w)));
+        r => HasNumber(r.AnswerOutput, "-1") || SaysNotFound(r.AnswerOutput));
 // =====================================================================
 
 
 // ================= HELPERS: OUTPUT MATCHING =================
-// Numbers are looked for in NumberOutput (menus and prompts removed, see WithoutBaseline),
+// Numbers are looked for in AnswerOutput (menus and prompts removed, see WithoutBaseline),
 // words in the full output (so "help" still finds command names in a menu).
-static bool OutputHas(RunResult r, string token)
+static bool OutputHas(RunResult r, string token) =>
+    Regex.IsMatch(token, @"^-?\d+(\.\d+)?$") ? HasNumber(r.AnswerOutput, token) : HasWord(r.Output, token);
+
+// ignore crash reports: their stack traces contain line numbers like "line 10"
+static string WithoutCrashReport(string text) =>
+    Regex.Replace(text, @"^(Unhandled exception.*|\s+at .*|\s*---.*)$", "", RegexOptions.Multiline);
+
+static bool HasNumber(string text, string number) =>
+    Regex.Matches(WithoutCrashReport(text), @"(?<![\d.,])-?\d+(?:[.,]\d+)?").Any(m => SameNumber(m.Value, number));
+
+static bool HasWord(string text, string word, bool wholeWord = false) =>
+    WordRegex(word, wholeWord).IsMatch(WithoutCrashReport(text).ToLowerInvariant());
+
+static int CountWord(string text, string word) =>
+    WordRegex(word, false).Matches(WithoutCrashReport(text).ToLowerInvariant()).Count;
+
+static Regex WordRegex(string token, bool wholeWord)
 {
-    bool isNumber = Regex.IsMatch(token, @"^-?\d+(\.\d+)?$");
-
-    // ignore crash reports: their stack traces contain line numbers like "line 10"
-    var output = Regex.Replace(isNumber ? r.NumberOutput : r.Output,
-        @"^(Unhandled exception.*|\s+at .*|\s*---.*)$", "", RegexOptions.Multiline);
-
-    if (isNumber)
-        return Regex.Matches(output, @"(?<![\d.,])-?\d+(?:[.,]\d+)?").Any(m => SameNumber(m.Value, token));
-
     // Each letter of the word may also be 1-2 non-ASCII characters: that covers real Slovak letters
     // (á, š...) and the garbage Windows makes of them when the console encodings don't match.
     var word = string.Concat(Simplify(token).Select(ch => char.IsLetter(ch)
         ? $@"(?:{ch}|[^\x00-\x7F]{{1,2}})"
         : Regex.Escape(ch.ToString())));
-    return Regex.IsMatch(output.ToLowerInvariant(), $@"(?<![\p{{L}}\d]){word}");
+    // a whole word must not continue with a letter (or a non-ASCII character, which may be a garbled one)
+    var end = wholeWord ? @"(?![\p{L}\d]|[^\x00-\x7F])" : "";
+    return new Regex($@"(?<![\p{{L}}\d]){word}{end}");
 }
 
 // Removes the program's menus and prompts from a test's output, using its baseline output:
@@ -590,11 +654,19 @@ static string WithoutBaseline(string output, string baseline)
         return line;
     }
 
-    // the menu may be glued to a different prompt in the baseline than in the test
-    // ("pole: 1. find 2. min" vs "Vyber 1-3: 1. find 2. min"), so compare them without prompts too
+    // The same text may be glued to a prompt in the baseline but not in the test, or the other way
+    // round ("...medzerou: Pole: 0 50 40 70" vs "Pole: 0 50 40 70"), so the baseline also knows every
+    // line's ending after each ':', '?' or '>', and test lines are compared with and without prompts.
+    var endings = baseLines
+        .SelectMany(l => l.Select((ch, i) => (ch, i)).Where(x => x.ch is ':' or '?' or '>').Select(x => l[(x.i + 1)..].Trim()))
+        .Where(l => l != "").ToList();
+    baseLines.UnionWith(endings);
     baseLines.UnionWith(baseLines.Select(StripPrompts).Where(l => l != "").ToList());
 
-    return string.Join("\n", output.Split('\n').Select(StripPrompts).Where(l => !baseLines.Contains(l)));
+    return string.Join("\n", output.Split('\n')
+        .Where(l => !baseLines.Contains(l.Trim()))
+        .Select(StripPrompts)
+        .Where(l => !baseLines.Contains(l)));
 }
 
 static bool SameNumber(string printed, string expected)
@@ -644,10 +716,30 @@ static RunResult Run(string file, string arguments, string[] inputs, TimeSpan ti
         CreateNoWindow         = true,
     };
 
+    // Students target whatever .NET their computer had (net8.0, net9.0...): run them on the newest
+    // installed .NET instead of failing with "You must install or update .NET".
+    psi.Environment["DOTNET_ROLL_FORWARD"] = "LatestMajor";
+
     using var p = new Process { StartInfo = psi };
     var output = new StringBuilder();
-    p.OutputDataReceived += (_, e) => { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
-    p.ErrorDataReceived  += (_, e) => { if (e.Data != null) lock (output) output.AppendLine(e.Data); };
+    // A program stuck in a loop can print hundreds of MB in a few seconds: stop it after 1 MB.
+    const int maxOutput = 1_000_000;
+    bool capped = false;
+    void Collect(string? line)
+    {
+        if (line is null) return;
+        lock (output)
+        {
+            if (capped) return;
+            output.AppendLine(line);
+            if (output.Length <= maxOutput) return;
+            capped = true;
+            output.AppendLine("… (stopped: the program printed more than 1 MB, probably an endless loop)");
+        }
+        try { p.Kill(entireProcessTree: true); } catch { }
+    }
+    p.OutputDataReceived += (_, e) => Collect(e.Data);
+    p.ErrorDataReceived  += (_, e) => Collect(e.Data);
 
     p.Start();
     p.BeginOutputReadLine();
@@ -667,7 +759,8 @@ static RunResult Run(string file, string arguments, string[] inputs, TimeSpan ti
     }
     p.WaitForExit(); // let the remaining output flush
 
-    lock (output) return new RunResult(finished ? p.ExitCode : -1, output.ToString(), !finished);
+    // stopped for too much output counts like a timeout: it never ended on its own
+    lock (output) return new RunResult(finished && !capped ? p.ExitCode : -1, output.ToString(), !finished || capped);
 }
 
 static void SaveLog(string logsDir, string student, string name, string content)
@@ -874,13 +967,16 @@ static string NormalizeType(string t) => t.Replace(" ", "").Replace("System.", "
 record Scenario(int Phase, string Command, string Name, string[] Inputs, Check Check, bool Edge = false);
 record Check(string Description, Func<RunResult, bool> Test);
 record ReportRow(string Student, string Build, string BuildErrors, List<int> Points, int Penalty, int Total,
-                 List<(Scenario Scenario, string Result, string Output)> Runs, List<string> StaticResults);
-record StaticCheck(string Name, string? Command, string ReturnType, string[] ParamTypes, int Depth = 0);
+                 List<ScenarioResult> Runs, List<string> StaticResults);
+record StaticCheck(string Name, string? Command, string ReturnType, string[] ParamTypes, int Depth = 0, int? Phase = null);
 record FunctionInfo(string Name, TypeSyntax ReturnType, ParameterListSyntax Parameters, SyntaxNode Node);
 record RunResult(int ExitCode, string Output, bool TimedOut)
 {
-    // Output without the program's menus and prompts: number checks look only here
-    public string NumberOutput { get; init; } = Output;
+    // Output without the program's menus and prompts: checks for answers look only here
+    public string AnswerOutput { get; init; } = Output;
+    // What the program printed for an unknown command (compared with help)
+    public string UnknownCommandOutput { get; init; } = "";
 }
+record ScenarioResult(Scenario Scenario, string Result, string Output, string AnswerOutput);
 record BuildResult(string Output, string? Dll);
 // =========================================
