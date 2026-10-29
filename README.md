@@ -104,6 +104,9 @@ Open `results.csv` in Excel (`;` separator, works with Slovak regional settings)
 | `REBUILT: project didn't build` | Their project failed but the code itself compiles; the **setup penalty** is deducted. |
 | `BUILD FAILED` | The code doesn't compile. 0 points; errors are in `logs/<Name>/build.log`. |
 | `NO PROJECT` | No code found at all. |
+| `GRADER ERROR` | The grader itself hit an error on this submission (e.g. a file it couldn't read). The other students are still graded; details are in `logs/<Name>/grader-error.log`. |
+
+Results are saved after every student, so if the run stops halfway the students graded so far are kept. If `results.csv` is open in Excel it can't be overwritten: the grader says so and you can close it and run again.
 
 When a repo contains several projects (e.g. class exercises next to the assignment), the grader picks the one whose code mentions the most command names (`"sum"`, `"rect"`, …).
 
@@ -177,6 +180,8 @@ Available checks:
 
 **Numbers** are compared at the precision the student printed (`8.6023` accepts `8.6`, `8,60`, `8.602325…`, but not `9`); whole numbers must be exact; `13` never counts as `3`. **Words** ignore case and diacritics and must start a word (`nachadz` matches `nachádza` but not `nenachádza`). They also work when Windows garbles Slovak letters in the output.
 
+**Menus and prompts** don't count for number checks, so a `4` in "4. help" can't pass `odm 16`. Before the tests, each program is run once with just `exit` (and once entering `rect` / `array` mode with other numbers) to capture what it prints anyway: those lines, and prompts glued to the next line ("Vyber 1-5: Výsledok: 4"), are ignored when looking for numbers. Word checks still see the whole output. The runs are in `BASELINES` below the scenarios and saved as `logs/<Name>/baseline *.log`; *Printed* in the report still shows the full output.
+
 ### Code checks (`STATIC ANALYSIS: CHECKS`)
 
 ```csharp
@@ -191,7 +196,7 @@ Types: `void`, `int`, `double`, …, `"num"` = any number type, `"*"` = anything
 ## Known limits: review these manually
 
 - `help lists commands` passes if the command names appear **anywhere** in the output, including a welcome message.
-- Number checks find the number anywhere in the output, including prompts.
+- Number checks ignore the program's menus and prompts (see *Menus and prompts* above), but a number in any other text still counts, e.g. "Zadaj 2 čísla" printed only after typing `sum`.
 - The `0` checks for text input can fail a correct program whose error message itself contains a 0 (e.g. "zadaj číslo väčšie ako 0"). Check the log.
 - Commit dates come from the student's computer, not from when they pushed.
 - The **No AI** rule cannot be checked automatically.

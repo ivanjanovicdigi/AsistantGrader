@@ -133,6 +133,18 @@ var scenarios = new List<Scenario>
     new(3, "edge", "find with text",       ["array", "0 50 40 70", "find", "abc", "70", "exit", "exit"], NoCrash("0", "1"), Edge: true),
     new(3, "edge", "find missing value",   ["array", "50 10 70 40", "find", "99", "exit", "exit"],       NoCrash(), Edge: true),
 };
+
+// ---------- BASELINES: what the program prints without being asked anything ----------
+// Before the tests, each program is run with these inputs to capture its menus and prompts
+// ("1. sum", "4. help", "Vyber 1-5:"). Number checks then ignore that text, so a "4" in the menu
+// can't pass "odm 16". A test starting with "rect" / "array" uses that mode's baseline, others use "".
+// The mode baselines use different numbers than the tests, so no real answer gets removed.
+var baselines = new Dictionary<string, string[]>
+{
+    [""]      = ["exit"],
+    ["rect"]  = ["rect", "2", "9", "exit", "exit"],
+    ["array"] = ["array", "1 2 6", "exit", "exit"],
+};
 // =========================================================
 
 
@@ -204,98 +216,147 @@ results.AppendLine(string.Join(";",
         .Concat(scenarios.Select(ColumnName))
         .Concat(staticChecks.Select(c => c.Name))));
 
+// Saved after every student, so a crash or Ctrl+C later on keeps the results so far.
+// A file open in Excel can't be overwritten: that is reported, and the next save tries again.
+bool SaveResults()
+{
+    try
+    {
+        File.WriteAllText(resultsFile, results.ToString(), Encoding.UTF8); // UTF-8 with BOM so Excel shows diacritics
+        File.WriteAllText(reportFile, BuildReport(scenarios, staticChecks, reportRows), Encoding.UTF8);
+        return true;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"   Could not save results (is {resultsFile} open in Excel?): {ex.Message}");
+        return false;
+    }
+}
+
 foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
 {
     var student = Path.GetFileName(repo);
     Console.WriteLine($"== {student}");
 
-    // ---------- 2a. Pick the project ----------
-    // Repos often hold class exercises next to the assignment: take the project whose code
-    // mentions the most command names ("sum", "rect", ...).
-    var csproj     = PickProject(repo, commandWords);
-    var projectDir = csproj is null ? repo : Path.GetDirectoryName(csproj)!;
-
-    // ---------- 2b. Build ----------
-    var buildStatus = "OK";
-    var buildErrors = "";
-    var codeDir     = projectDir; // folder with the code that actually gets graded
-    var penalty     = 0;
-    var outDir      = Path.Combine(Path.GetTempPath(), "AssistantGrader", student);
-
-    var build = csproj is null ? null : BuildProject(csproj, outDir, buildTimeout);
-    string? dll = build?.Dll;
-
-    if (dll is null)
+    // One broken submission must not stop the others: any error is recorded as GRADER ERROR for this student.
+    try
     {
-        if (build != null) SaveLog(logsDir, student, "build", build.Output);
-        buildErrors = build is null
-            ? "No .csproj project file found."
-            : string.Join("\n", build.Output.Split('\n')
-                .Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)).Select(l => l.Trim()).Distinct().Take(10));
+        // ---------- 2a. Pick the project ----------
+        // Repos often hold class exercises next to the assignment: take the project whose code
+        // mentions the most command names ("sum", "rect", ...).
+        var csproj     = PickProject(repo, commandWords);
+        var projectDir = csproj is null ? repo : Path.GetDirectoryName(csproj)!;
 
-        // Fallback: build just the assistant's .cs files with a standard project. If that works,
-        // the code is fine and only the setup was wrong -> grade it, minus setupPenalty.
-        var rebuildDir = AssistantCodeFolder(projectDir, commandWords);
-        var rebuild    = rebuildDir is null ? null : BuildRebuilt(rebuildDir, student, outDir + "-rebuilt", buildTimeout);
+        // ---------- 2b. Build ----------
+        var buildStatus = "OK";
+        var buildErrors = "";
+        var codeDir     = projectDir; // folder with the code that actually gets graded
+        var penalty     = 0;
+        var outDir      = Path.Combine(Path.GetTempPath(), "AssistantGrader", student);
 
-        if (rebuild?.Dll != null)
+        var build = csproj is null ? null : BuildProject(csproj, outDir, buildTimeout);
+        string? dll = build?.Dll;
+
+        if (dll is null)
         {
-            dll         = rebuild.Dll;
-            codeDir     = rebuildDir!;
-            penalty     = setupPenalty;
-            buildStatus = build is null ? "REBUILT: no project file" : "REBUILT: project didn't build";
+            if (build != null) SaveLog(logsDir, student, "build", build.Output);
+            buildErrors = build is null
+                ? "No .csproj project file found."
+                : string.Join("\n", build.Output.Split('\n')
+                    .Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)).Select(l => l.Trim()).Distinct().Take(10));
+
+            // Fallback: build just the assistant's .cs files with a standard project. If that works,
+            // the code is fine and only the setup was wrong -> grade it, minus setupPenalty.
+            var rebuildDir = AssistantCodeFolder(projectDir, commandWords);
+            var rebuild    = rebuildDir is null ? null : BuildRebuilt(rebuildDir, student, outDir + "-rebuilt", buildTimeout);
+
+            if (rebuild?.Dll != null)
+            {
+                dll         = rebuild.Dll;
+                codeDir     = rebuildDir!;
+                penalty     = setupPenalty;
+                buildStatus = build is null ? "REBUILT: no project file" : "REBUILT: project didn't build";
+            }
+            else
+            {
+                buildStatus = build is null ? "NO PROJECT" : "BUILD FAILED";
+                if (rebuild != null) SaveLog(logsDir, student, "build-rebuilt", rebuild.Output);
+            }
         }
-        else
+
+        // ---------- 2c. Static analysis (also when the build failed) ----------
+        var roots         = ParseStudentCode(codeDir);
+        var functions     = CollectFunctions(roots);
+        var staticResults = staticChecks.Select(c => RunStaticCheck(roots, functions, c)).ToList();
+
+        // ---------- 2d. Functional scenarios ----------
+        // menus and prompts the program prints anyway (see BASELINES)
+        var baselineOutput = new Dictionary<string, string>();
+        if (dll != null)
+            foreach (var (mode, inputs) in baselines)
+            {
+                var b = Run("dotnet", $"\"{dll}\"", inputs, scenarioTimeout);
+                SaveLog(logsDir, student, $"baseline {(mode == "" ? "main" : mode)}", b.Output);
+                baselineOutput[mode] = b.Output;
+            }
+
+        var scenarioResults = new List<(Scenario Scenario, string Result, string Output)>();
+        foreach (var s in scenarios)
         {
-            buildStatus = build is null ? "NO PROJECT" : "BUILD FAILED";
-            if (rebuild != null) SaveLog(logsDir, student, "build-rebuilt", rebuild.Output);
+            if (dll is null) { scenarioResults.Add((s, "NOT RUN", "")); continue; }
+
+            var r = Run("dotnet", $"\"{dll}\"", s.Inputs, scenarioTimeout);
+            SaveLog(logsDir, student, ColumnName(s), r.Output); // what the program printed, for manual review
+
+            var mode = baselineOutput.ContainsKey(s.Inputs[0]) ? s.Inputs[0] : "";
+            r = r with { NumberOutput = WithoutBaseline(r.Output, baselineOutput[""] + "\n" + baselineOutput[mode]) };
+
+            bool ok = s.Check.Test(r);
+            var result = ok                    ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
+                       : IsConsoleIssue(r.Output) ? "CHECK: console call"                   // see IsConsoleIssue below
+                       : r.TimedOut            ? "TIMEOUT"
+                       : !r.Output.Any(char.IsLetterOrDigit) ? "FAIL (no output)"          // the program printed nothing
+                       :                         "FAIL";
+            scenarioResults.Add((s, result, r.Output));
         }
+
+        // ---------- 2e. Rubric points ----------
+        var points = new[] { 1, 2, 3 }.Select(phase => PhasePoints(scenarioResults, phase, dll != null)).ToList();
+        var total  = Math.Max(0, points.Sum() - penalty);
+
+        results.AppendLine(string.Join(";",
+            new[] { student, buildStatus }
+                .Concat(points.Select(p => p.ToString()))
+                .Append(penalty == 0 ? "" : $"-{penalty}")
+                .Append(total.ToString())
+                .Concat(scenarioResults.Select(x => x.Result))
+                .Concat(staticResults)));
+
+        reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults));
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"   GRADER ERROR for {student}: {ex.Message}");
+        try { SaveLog(logsDir, student, "grader-error", ex.ToString()); } catch { }
+
+        var zero = new List<int> { 0, 0, 0 };
+        results.AppendLine(string.Join(";",
+            new[] { student, "GRADER ERROR", "0", "0", "0", "", "0" }
+                .Concat(scenarios.Select(_ => "NOT RUN"))
+                .Concat(staticChecks.Select(_ => ""))));
+        reportRows.Add(new ReportRow(student, "GRADER ERROR", ex.Message, zero, 0, 0,
+            scenarios.Select(s => (s, "NOT RUN", "")).ToList(), staticChecks.Select(_ => "").ToList()));
     }
 
-    // ---------- 2c. Static analysis (also when the build failed) ----------
-    var roots         = ParseStudentCode(codeDir);
-    var functions     = CollectFunctions(roots);
-    var staticResults = staticChecks.Select(c => RunStaticCheck(roots, functions, c)).ToList();
-
-    // ---------- 2d. Functional scenarios ----------
-    var scenarioResults = new List<(Scenario Scenario, string Result, string Output)>();
-    foreach (var s in scenarios)
-    {
-        if (dll is null) { scenarioResults.Add((s, "NOT RUN", "")); continue; }
-
-        var r = Run("dotnet", $"\"{dll}\"", s.Inputs, scenarioTimeout);
-        SaveLog(logsDir, student, ColumnName(s), r.Output); // what the program printed, for manual review
-
-        bool ok = s.Check.Test(r);
-        var result = ok                    ? (r.TimedOut ? "PASS (no exit)" : "PASS")   // right answer, but "exit" didn't end it
-                   : IsConsoleIssue(r.Output) ? "CHECK: console call"                   // see IsConsoleIssue below
-                   : r.TimedOut            ? "TIMEOUT"
-                   : !r.Output.Any(char.IsLetterOrDigit) ? "FAIL (no output)"          // the program printed nothing
-                   :                         "FAIL";
-        scenarioResults.Add((s, result, r.Output));
-    }
-
-    // ---------- 2e. Rubric points ----------
-    var points = new[] { 1, 2, 3 }.Select(phase => PhasePoints(scenarioResults, phase, dll != null)).ToList();
-    var total  = Math.Max(0, points.Sum() - penalty);
-
-    results.AppendLine(string.Join(";",
-        new[] { student, buildStatus }
-            .Concat(points.Select(p => p.ToString()))
-            .Append(penalty == 0 ? "" : $"-{penalty}")
-            .Append(total.ToString())
-            .Concat(scenarioResults.Select(x => x.Result))
-            .Concat(staticResults)));
-
-    reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults));
+    SaveResults();
 }
 // ==============================================================
 
 
 // ================= STEP 3: SAVE RESULTS =================
-File.WriteAllText(resultsFile, results.ToString(), Encoding.UTF8); // UTF-8 with BOM so Excel shows diacritics
-File.WriteAllText(reportFile, BuildReport(scenarios, staticChecks, reportRows), Encoding.UTF8);
-Console.WriteLine($"Done -> {resultsFile}, {reportFile}");
+Console.WriteLine(SaveResults()
+    ? $"Done -> {resultsFile}, {reportFile}"
+    : $"Done, but the results could NOT be saved. Close {resultsFile} / {reportFile} and run again.");
 // ========================================================
 
 
@@ -432,19 +493,19 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
 // ================= HELPERS: CHECKS USED IN SCENARIOS =================
 // Each check has a short description (shown in report.html) and the test itself.
 static Check Has(string token) =>
-    new($"contains {token}", r => OutputHas(r.Output, token));
+    new($"contains {token}", r => OutputHas(r,token));
 
 static Check HasAny(params string[] tokens) =>
-    new($"contains one of: {string.Join(", ", tokens)}", r => tokens.Any(t => OutputHas(r.Output, t)));
+    new($"contains one of: {string.Join(", ", tokens)}", r => tokens.Any(t => OutputHas(r,t)));
 
 static Check HasAll(params string[] tokens) =>
-    new($"contains all of: {string.Join(", ", tokens)}", r => tokens.All(t => OutputHas(r.Output, t)));
+    new($"contains all of: {string.Join(", ", tokens)}", r => tokens.All(t => OutputHas(r,t)));
 
 // Text typed instead of a number must not quietly become 0. Fails on a crash, on any 0 in the output,
 // or when zeroResult shows up without correctResult (0 + 40 = 40 printed as just "40").
 static Check RejectsText(string zeroResult, string correctResult) =>
     new($"no crash, no 0, and not {zeroResult} without {correctResult}",
-        r => NoCrash("0").Test(r) && !(OutputHas(r.Output, zeroResult) && !OutputHas(r.Output, correctResult)));
+        r => NoCrash("0").Test(r) && !(OutputHas(r,zeroResult) && !OutputHas(r,correctResult)));
 
 static Check AllOf(params Check[] checks) =>
     new(string.Join("  AND  ", checks.Select(c => c.Description)), r => checks.All(c => c.Test(r)));
@@ -455,14 +516,15 @@ static Check NoCrash(params string[] forbidden) =>
         r => r.ExitCode == 0 && !r.TimedOut
              && r.Output.Any(char.IsLetterOrDigit)
              && !r.Output.Contains("Unhandled exception")
-             && !forbidden.Any(t => OutputHas(r.Output, t)));
+             && !forbidden.Any(t => OutputHas(r,t)));
 
 static Check Sequence(string numbers)
 {
-    var expected = numbers.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray();
+    // BigInteger, not int: a student may print a number too long for int, which must not crash the grader
+    var expected = numbers.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(n => System.Numerics.BigInteger.Parse(n)).ToArray();
     return new($"numbers in this order: {numbers}", r =>
     {
-        var found = Regex.Matches(r.Output, @"(?<!\d)-?\d+").Select(m => int.Parse(m.Value)).ToArray();
+        var found = Regex.Matches(r.NumberOutput, @"(?<!\d)-?\d+").Select(m => System.Numerics.BigInteger.Parse(m.Value)).ToArray();
         for (int i = 0; i + expected.Length <= found.Length; i++)
             if (found.Skip(i).Take(expected.Length).SequenceEqual(expected)) return true;
         return false;
@@ -477,22 +539,27 @@ static string[] NotFoundWords() => ["nenachadz", "nenasiel", "nenasla", "nenaslo
 
 static Check Found(params string[] positions) =>
     new($"position {string.Join(" or ", positions)}, or a 'found' answer (nachádza, áno, true...)",
-        r => positions.Any(p => OutputHas(r.Output, p))
-             || (FoundWords().Any(w => OutputHas(r.Output, w)) && !NotFoundWords().Any(w => OutputHas(r.Output, w))));
+        r => positions.Any(p => OutputHas(r,p))
+             || (FoundWords().Any(w => OutputHas(r,w)) && !NotFoundWords().Any(w => OutputHas(r,w))));
 
 static Check NotFound() =>
     new("-1, or a 'not found' answer (nenachádza, nie, false...)",
-        r => OutputHas(r.Output, "-1") || NotFoundWords().Any(w => OutputHas(r.Output, w)));
+        r => OutputHas(r,"-1") || NotFoundWords().Any(w => OutputHas(r,w)));
 // =====================================================================
 
 
 // ================= HELPERS: OUTPUT MATCHING =================
-static bool OutputHas(string output, string token)
+// Numbers are looked for in NumberOutput (menus and prompts removed, see WithoutBaseline),
+// words in the full output (so "help" still finds command names in a menu).
+static bool OutputHas(RunResult r, string token)
 {
-    // ignore crash reports: their stack traces contain line numbers like "line 10"
-    output = Regex.Replace(output, @"^(Unhandled exception.*|\s+at .*|\s*---.*)$", "", RegexOptions.Multiline);
+    bool isNumber = Regex.IsMatch(token, @"^-?\d+(\.\d+)?$");
 
-    if (Regex.IsMatch(token, @"^-?\d+(\.\d+)?$"))
+    // ignore crash reports: their stack traces contain line numbers like "line 10"
+    var output = Regex.Replace(isNumber ? r.NumberOutput : r.Output,
+        @"^(Unhandled exception.*|\s+at .*|\s*---.*)$", "", RegexOptions.Multiline);
+
+    if (isNumber)
         return Regex.Matches(output, @"(?<![\d.,])-?\d+(?:[.,]\d+)?").Any(m => SameNumber(m.Value, token));
 
     // Each letter of the word may also be 1-2 non-ASCII characters: that covers real Slovak letters
@@ -501,6 +568,33 @@ static bool OutputHas(string output, string token)
         ? $@"(?:{ch}|[^\x00-\x7F]{{1,2}})"
         : Regex.Escape(ch.ToString())));
     return Regex.IsMatch(output.ToLowerInvariant(), $@"(?<![\p{{L}}\d]){word}");
+}
+
+// Removes the program's menus and prompts from a test's output, using its baseline output:
+//  - lines that also appear in the baseline ("1. sum", "4. help") are dropped
+//  - prompts printed with Console.Write end up glued to the next line ("Vyber 1-5: Vysledok: 4"),
+//    so a line starting with baseline text up to a ':', '?' or '>' loses that start ("Vysledok: 4")
+static string WithoutBaseline(string output, string baseline)
+{
+    var baseLines = baseline.Split('\n').Select(l => l.Trim()).Where(l => l != "").ToHashSet();
+    var prompts = baseLines
+        .SelectMany(l => l.Select((ch, i) => (ch, i)).Where(x => x.ch is ':' or '?' or '>').Select(x => l[..(x.i + 1)]))
+        .Distinct().OrderByDescending(p => p.Length).ToList();
+
+    string StripPrompts(string line)
+    {
+        line = line.Trim();
+        string? Prompt() => prompts.FirstOrDefault(p => line.StartsWith(p, StringComparison.Ordinal));
+        for (var p = Prompt(); p != null; p = Prompt())
+            line = line[p.Length..].TrimStart();
+        return line;
+    }
+
+    // the menu may be glued to a different prompt in the baseline than in the test
+    // ("pole: 1. find 2. min" vs "Vyber 1-3: 1. find 2. min"), so compare them without prompts too
+    baseLines.UnionWith(baseLines.Select(StripPrompts).Where(l => l != "").ToList());
+
+    return string.Join("\n", output.Split('\n').Select(StripPrompts).Where(l => !baseLines.Contains(l)));
 }
 
 static bool SameNumber(string printed, string expected)
@@ -783,6 +877,10 @@ record ReportRow(string Student, string Build, string BuildErrors, List<int> Poi
                  List<(Scenario Scenario, string Result, string Output)> Runs, List<string> StaticResults);
 record StaticCheck(string Name, string? Command, string ReturnType, string[] ParamTypes, int Depth = 0);
 record FunctionInfo(string Name, TypeSyntax ReturnType, ParameterListSyntax Parameters, SyntaxNode Node);
-record RunResult(int ExitCode, string Output, bool TimedOut);
+record RunResult(int ExitCode, string Output, bool TimedOut)
+{
+    // Output without the program's menus and prompts: number checks look only here
+    public string NumberOutput { get; init; } = Output;
+}
 record BuildResult(string Output, string? Dll);
 // =========================================
