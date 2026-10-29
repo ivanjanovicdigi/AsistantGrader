@@ -366,7 +366,8 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                 .Concat(scenarioResults.Select(x => x.Result))
                 .Concat(staticResults)));
 
-        reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults, review));
+        reportRows.Add(new ReportRow(student, buildStatus, buildErrors, points, penalty, total, scenarioResults, staticResults, review,
+                                     ReadStudentCode(codeDir)));
     }
     catch (Exception ex)
     {
@@ -380,7 +381,7 @@ foreach (var repo in Directory.GetDirectories(submissionsDir).OrderBy(d => d))
                 .Concat(staticChecks.Select(_ => ""))));
         reportRows.Add(new ReportRow(student, "GRADER ERROR", ex.Message, zero, 0, 0,
             scenarios.Select(s => new ScenarioResult(s, "NOT RUN", "", "")).ToList(), staticChecks.Select(_ => "").ToList(),
-            ["GRADER ERROR (0 points)"]));
+            ["GRADER ERROR (0 points)"], []));
     }
 
     SaveResults();
@@ -546,6 +547,11 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         tr.review th.name { box-shadow:inset 4px 0 0 #e0a800; }
         .rev { min-width:260px; max-width:340px; }
         .rev ul { margin:0; padding-left:16px; }
+        td.src { padding:4px 8px 8px; background:var(--bg); }
+        .src-in { position:sticky; left:0; width:min(1000px, calc(100vw - 70px)); }
+        pre.code { white-space:pre; max-width:none; max-height:600px; counter-reset:ln; }
+        pre.code .l::before { counter-increment:ln; content:counter(ln); display:inline-block; width:3em;
+                              margin-right:1em; text-align:right; color:var(--muted); user-select:none; }
         .lbl { font-size:11px; color:var(--muted); margin-top:6px; }
         pre { white-space:pre-wrap; word-break:break-word; max-width:380px; max-height:320px; overflow:auto; margin:3px 0 6px;
               padding:6px; background:var(--code); color:var(--fg); border:1px solid var(--line); border-radius:4px;
@@ -553,7 +559,7 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         </style></head><body>
         <h1>AssistantGrader – report</h1>
         <div class="bar">
-          <button onclick="document.querySelectorAll('details').forEach(d => d.open = true)">Expand all</button>
+          <button onclick="document.querySelectorAll('details:not(.src)').forEach(d => d.open = true)">Expand all results</button>
           <button onclick="document.querySelectorAll('details').forEach(d => d.open = false)">Collapse all</button>
           <select id="student" onchange="applyFilter()"><option value="">All students</option>
         """);
@@ -604,6 +610,20 @@ static string BuildReport(List<Scenario> scenarios, List<StaticCheck> staticChec
         foreach (var result in row.StaticResults)
             h.Append($"<td class=\"{Css(result)}\">{E(result)}</td>");
         h.Append("</tr>");
+
+        // the student's graded code, in a collapsible row under their results (same filters as their row)
+        int columns = 3 + scenarios.Count + staticChecks.Count;
+        int lines   = row.Code.Sum(c => c.Text.Split('\n').Length);
+        h.Append($"<tr data-student=\"{E(row.Student)}\"{(needsReview ? " class=\"review\"" : "")}>" +
+                 $"<td class=\"src\" colspan=\"{columns}\"><div class=\"src-in\"><details class=\"src\"><summary>" +
+                 (row.Code.Count == 0 ? $"Code of {E(row.Student)}: no .cs files found"
+                                      : $"Code of {E(row.Student)} ({row.Code.Count} file{(row.Code.Count == 1 ? "" : "s")}, {lines} lines)") +
+                 "</summary>");
+        foreach (var (file, text) in row.Code)
+            h.Append($"<div class=\"lbl\">{E(file)}</div><pre class=\"code\">" +
+                     string.Concat(text.Replace("\r\n", "\n").Split('\n').Select(l => $"<span class=\"l\">{E(l)}</span>\n")) +
+                     "</pre>");
+        h.Append("</details></div></td></tr>");
     }
     h.Append($"</tbody></table></div><p class=\"x\">Generated {DateTime.Now:yyyy-MM-dd HH:mm}</p>");
     // show one student (dropdown) and/or only those needing review (checkbox)
@@ -877,6 +897,19 @@ static IEnumerable<string> StudentCsFiles(string dir)
         .Where(f => !f.Contains($"{sep}bin{sep}") && !f.Contains($"{sep}obj{sep}"));
 }
 
+// The graded .cs files with their text, for the report. Very large files are cut.
+static List<(string File, string Text)> ReadStudentCode(string dir)
+{
+    const int maxChars = 200_000;
+    return StudentCsFiles(dir).OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Select(f =>
+    {
+        string text;
+        try { text = File.ReadAllText(f); } catch (Exception ex) { text = $"(could not read: {ex.Message})"; }
+        if (text.Length > maxChars) text = text[..maxChars] + "\n… (cut, file is too long)";
+        return (Path.GetRelativePath(dir, f), text);
+    }).ToList();
+}
+
 // dotnet build into outDir. Dll is the program to run, or null when the build failed.
 static BuildResult BuildProject(string csproj, string outDir, TimeSpan timeout)
 {
@@ -1061,7 +1094,8 @@ static string NormalizeType(string t) => t.Replace(" ", "").Replace("System.", "
 record Scenario(int Phase, string Command, string Name, string[] Inputs, Check Check, bool Edge = false);
 record Check(string Description, Func<RunResult, bool> Test);
 record ReportRow(string Student, string Build, string BuildErrors, List<int> Points, int Penalty, int Total,
-                 List<ScenarioResult> Runs, List<string> StaticResults, List<string> Review);
+                 List<ScenarioResult> Runs, List<string> StaticResults, List<string> Review,
+                 List<(string File, string Text)> Code);
 record StaticCheck(string Name, string? Command, string ReturnType, string[] ParamTypes, int Depth = 0, int? Phase = null);
 record FunctionInfo(string Name, TypeSyntax ReturnType, ParameterListSyntax Parameters, SyntaxNode Node);
 record RunResult(int ExitCode, string Output, bool TimedOut)

@@ -5,7 +5,7 @@ Automatic grader for the **"Asistent"** assignment in Programming 1 (C# / .NET).
 For every student it produces:
 
 - **`results.csv`**: one row per student with points and every test result (opens directly in Excel).
-- **`report.html`**: the same results in a browser. Click any cell to see exactly what was typed and what the program printed. Filter to one student, or to only the students that need a manual look.
+- **`report.html`**: the same results in a browser. Click any cell to see exactly what was typed and what the program printed. Under each student, a collapsible **Code** section shows every graded `.cs` file with line numbers. Filter to one student, or to only the students that need a manual look.
 - **`logs/<Student>/`**: the full output of every test run, plus build errors.
 
 > **Student data never belongs in this repo.** `submissions/`, `logs/`, `results.csv`, `report.html` and `repos.txt` are in `.gitignore`. Keep it that way.
